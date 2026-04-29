@@ -178,6 +178,25 @@ html, body { height: 100%; display: flex; flex-direction: column; }
 
 .summary-row:last-of-type { border-bottom: none; }
 
+.summary-values {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+  padding: 0.5rem 0 0.85rem;
+}
+
+.summary-value-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 0.6rem 0.75rem;
+  background: #f8f9fb;
+  border: 1px solid var(--phila-border);
+  border-radius: var(--radius);
+}
+
+.summary-value-block .sr-value-main { font-size: 16px; }
+
 .sr-label {
   font-size: 11px;
   color: var(--phila-text-muted);

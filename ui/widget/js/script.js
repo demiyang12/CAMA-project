@@ -130,62 +130,26 @@ function initPropertyTileLayer() {
     if (propertyHoverPopup) widgetMap.closePopup(propertyHoverPopup);
   });
 
-  propertyTileLayer.on('click', async e => {
+  propertyTileLayer.on('click', e => {
     L.DomEvent.stopPropagation(e);
     const tileProps = e.layer.properties;
     if (!tileProps) return;
 
-    // Close the hover tooltip immediately so it doesn't stay on screen
     if (propertyHoverPopup) widgetMap.closePopup(propertyHoverPopup);
 
-    const lat = e.latlng.lat;
-    const lng = e.latlng.lng;
-
-    // Build prop from tile data immediately, show it without waiting for OPA
     const prop = {
-      location:      tileProps.address || '',
-      lat,
-      lng,
-      zip_code:      '',
-      parcel_number: String(tileProps.property_id || ''),
-      market_value:  tileProps.market_value != null ? parseInt(tileProps.market_value, 10) : null,
-      predicted_value: tileProps.predicted_value,
-      owner_1:       '',
-      owner_2:       '',
-      sale_price:    null,
-      sale_date:     null,
-      year_built:    null,
-      building_code_description: '',
+      location:        tileProps.address || '',
+      lat:             e.latlng.lat,
+      lng:             e.latlng.lng,
+      parcel_number:   String(tileProps.property_id || ''),
+      market_value:    tileProps.market_value    != null ? parseFloat(tileProps.market_value)    : null,
+      predicted_value: tileProps.predicted_value != null ? parseFloat(tileProps.predicted_value) : null,
     };
 
     clearError();
-    // Show tile data right away — panel updates instantly on click
     placeMapMarker(prop);
-    populateSummary(prop, null);
+    populateSummary(prop);
     if (prop.location) el('propertySearch').value = titleCase(prop.location);
-    setSearchState(true);
-
-    // Enrich with OPA Socrata + city distribution in parallel
-    const [opaData, distrib] = await Promise.all([
-      prop.parcel_number ? OPA.getByParcelNumber(prop.parcel_number).catch(() => null) : Promise.resolve(null),
-      OPA.getCityDistribution().catch(() => []),
-    ]);
-
-    if (opaData) {
-      Object.assign(prop, { lat, lng, ...opaData });
-      if (prop.location) el('propertySearch').value = titleCase(prop.location);
-      const nearby = await OPA.getNearby(prop.zip_code, prop.parcel_number, 5).catch(() => []);
-      populateSummary(prop, nearby);
-      renderDistChart(distrib, prop.market_value);
-      renderNbrChart(nearby, prop);
-      placeMapMarker(prop);
-    } else {
-      populateSummary(prop, []);
-      renderDistChart(distrib, prop.market_value);
-      renderNbrChart([], prop);
-    }
-
-    setSearchState(false);
   });
 
   propertyTileLayer.addTo(widgetMap);
@@ -269,10 +233,12 @@ function setupAutocomplete(inputId, onSelect) {
 
 // ── Search ───────────────────────────────────────────────────
 
-// Called when user types and hits Enter, or clicks Search button
+// Called when user types and hits Enter, or clicks Search button.
+// Search is just a navigation aid — values populate when the user
+// clicks the property's tile on the map.
 async function lookupProperty(preloadedProp) {
   if (preloadedProp) {
-    await processProp(preloadedProp);
+    processProp(preloadedProp);
     return;
   }
 
@@ -289,7 +255,7 @@ async function lookupProperty(preloadedProp) {
       setSearchState(false);
       return;
     }
-    await processProp(results[0]);
+    processProp(results[0]);
   } catch (err) {
     showError('Could not load property data. Please try again.');
     console.error('[widget] lookupProperty:', err);
@@ -298,21 +264,9 @@ async function lookupProperty(preloadedProp) {
 }
 
 // Core flow once we have a property record
-async function processProp(prop) {
-  setSearchState(true);
-
+function processProp(prop) {
   placeMapMarker(prop);
-  populateSummary(prop, null);
-
-  const [nearby, distrib] = await Promise.all([
-    OPA.getNearby(prop.zip_code, prop.parcel_number, 5).catch(() => []),
-    OPA.getCityDistribution().catch(() => []),
-  ]);
-
-  populateSummary(prop, nearby);
-  renderDistChart(distrib, prop.market_value);
-  renderNbrChart(nearby, prop);
-
+  populateSummary(prop);
   setSearchState(false);
 }
 
@@ -343,105 +297,30 @@ function clearMarker() {
 
 // ── Summary card ─────────────────────────────────────────────
 
-function populateSummary(prop, nearby) {
-  const currentVal = parseInt(prop.market_value, 10) || 0;
-
+function populateSummary(prop) {
   el('summaryAddress').textContent =
-    titleCase(prop.location) + (prop.zip_code ? ', Philadelphia PA ' + prop.zip_code : '');
+    (titleCase(prop.location) || '—') + (prop.zip_code ? ', Philadelphia PA ' + prop.zip_code : '');
 
-  const pidParts = ['Property ID: ' + (prop.parcel_number || '—')];
-  if (prop.owner_1) pidParts.push('Owner: ' + titleCase(prop.owner_1));
-  if (prop.year_built) pidParts.push('Built: ' + prop.year_built);
-  el('summaryPid').textContent = pidParts.join('  ·  ');
+  el('summaryPid').textContent = 'Property ID: ' + (prop.parcel_number || '—');
 
-  el('summaryAssessedValue').textContent = fmtMoney(currentVal || null);
+  const assessed = prop.predicted_value != null ? parseFloat(prop.predicted_value) : null;
+  const market   = prop.market_value    != null ? parseFloat(prop.market_value)    : null;
 
-  if (nearby && nearby.length) {
-    const nbrVals = nearby.map(n => parseInt(n.market_value, 10)).filter(v => v > 0);
-    if (nbrVals.length && currentVal) {
-      const avg = nbrVals.reduce((a, b) => a + b, 0) / nbrVals.length;
-      const rel = currentVal > avg
-        ? '<span class="insight-tag above">above</span>'
-        : '<span class="insight-tag below">below</span>';
-      el('summaryInsight').innerHTML =
-        `This property's assessed value is ${rel} the surrounding ZIP ${escHtml(prop.zip_code)} average of <strong>${fmtMoney(avg)}</strong>.`;
-      return;
-    }
+  el('summaryAssessedValue').textContent = assessed != null ? fmtMoney(assessed) : '—';
+  el('summaryMarketValue').textContent   = market   != null ? fmtMoney(market)   : '—';
+
+  const insight = el('summaryInsight');
+  if (assessed != null && market != null && market > 0) {
+    const diff = assessed - market;
+    const pct  = Math.round((diff / market) * 100);
+    const tag  = diff >= 0
+      ? '<span class="insight-tag above">above</span>'
+      : '<span class="insight-tag below">below</span>';
+    insight.innerHTML =
+      `Predicted assessed value is ${tag} market by <strong>${fmtMoney(Math.abs(diff))}</strong> (${Math.abs(pct)}%).`;
+  } else {
+    insight.textContent = 'Click any property on the map to see its predicted and market values.';
   }
-
-  el('summaryInsight').textContent = currentVal
-    ? 'Search for a property to compare its value to the neighborhood average.'
-    : 'Search for a property to see its assessed value.';
-}
-
-// ── Charts ───────────────────────────────────────────────────
-
-const EMPTY_HTML = '<div class="chart-empty">No data available.</div>';
-
-function renderDistChart(distrib, propertyValue) {
-  const section = el('chartDist');
-  if (!distrib || !distrib.length) { section.innerHTML = EMPTY_HTML; return; }
-
-  const LABELS = ['<125k', '125–250k', '250–375k', '375–500k',
-                  '500–625k', '625–750k', '750–875k', '875k+'];
-  const BOUNDS = [0, 125000, 250000, 375000, 500000, 625000, 750000, 875000, Infinity];
-
-  const propVal    = parseInt(propertyValue, 10);
-  const propBucket = BOUNDS.findIndex((b, i) => propVal >= b && propVal < BOUNDS[i + 1]);
-  const counts     = new Array(8).fill(0);
-  distrib.forEach(r => {
-    const b = parseInt(r.bucket, 10);
-    if (b >= 1 && b <= 8) counts[b - 1] = parseInt(r.cnt, 10);
-  });
-  const maxCnt = Math.max(...counts, 1);
-
-  const cols = counts.map((cnt, i) => {
-    const pct = Math.round((cnt / maxCnt) * 88) + 8;
-    return `
-      <div class="dc-col${(i + 1) === propBucket ? ' highlight' : ''}">
-        <div class="dc-bar" style="height:${pct}%"></div>
-        <div class="dc-tick">${LABELS[i]}</div>
-      </div>`;
-  }).join('');
-
-  const youLabel = propBucket >= 1
-    ? `&#8593; You (${LABELS[propBucket - 1]})`
-    : '&#8593; Your property';
-
-  section.className = '';
-  section.innerHTML = `
-    <div class="dist-chart">
-      <div class="dist-bars">${cols}</div>
-      <div class="dc-you-label">${youLabel}</div>
-    </div>`;
-}
-
-function renderNbrChart(nearby, thisProp) {
-  const section = el('chartNbr');
-  if (!nearby || !nearby.length) { section.innerHTML = EMPTY_HTML; return; }
-
-  const all = [
-    { name: 'This Property', value: parseInt(thisProp.market_value, 10), isSelf: true },
-    ...nearby.map(n => ({
-      name:  titleCase(n.location).split(' ').slice(0, 3).join(' '),
-      value: parseInt(n.market_value, 10),
-    })),
-  ].filter(p => p.value > 0).sort((a, b) => b.value - a.value);
-
-  const maxVal = Math.max(...all.map(p => p.value), 1);
-  const rows   = all.map(p => {
-    const pct = Math.round((p.value / maxVal) * 94) + 4;
-    return `
-      <div class="hc-row${p.isSelf ? ' self' : ''}">
-        <div class="hc-name">${escHtml(p.name)}</div>
-        <div class="hc-bar-wrap">
-          <div class="hc-bar" style="width:${pct}%"><span>${fmtMoney(p.value)}</span></div>
-        </div>
-      </div>`;
-  }).join('');
-
-  section.className = '';
-  section.innerHTML = `<div class="horiz-chart">${rows}</div>`;
 }
 
 // ── UI state helpers ──────────────────────────────────────────

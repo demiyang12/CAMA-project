@@ -60,10 +60,9 @@
         <div id="widget-map"></div>
       </div>
 
-      <!-- Right: Two stacked cards -->
+      <!-- Right: Property Summary -->
       <div class="right-panel">
 
-        <!-- Card 1: Property Summary -->
         <div class="summary-card">
           <div class="summary-header">
             <div id="summaryAddress" class="summary-address">—</div>
@@ -71,31 +70,19 @@
           </div>
           <div class="summary-body">
 
-            <div class="summary-row">
-              <div class="sr-label">Assessed Value</div>
-              <div id="summaryAssessedValue" class="sr-value sr-value-main">—</div>
+            <div class="summary-values">
+              <div class="summary-value-block">
+                <div class="sr-label">Assessed Value (Predicted)</div>
+                <div id="summaryAssessedValue" class="sr-value sr-value-main">—</div>
+              </div>
+              <div class="summary-value-block">
+                <div class="sr-label">Market Value</div>
+                <div id="summaryMarketValue" class="sr-value sr-value-main">—</div>
+              </div>
             </div>
 
             <div id="summaryInsight" class="summary-insight">
-              Search for a property to see how its assessed value compares to the surrounding neighborhood average.
-            </div>
-
-          </div>
-        </div>
-
-        <!-- Card 2: Charts -->
-        <div class="charts-card">
-          <div class="card-header">Assessment Analysis</div>
-          <div class="charts-body">
-
-            <div class="chart-section">
-              <div class="chart-label">Position in City-Wide Distribution</div>
-              <div id="chartDist" class="chart-empty">Search for a property to load data.</div>
-            </div>
-
-            <div class="chart-section">
-              <div class="chart-label">Neighborhood Comparison</div>
-              <div id="chartNbr" class="chart-empty">Search for a property to load data.</div>
+              Click any property on the map to see its predicted and market values.
             </div>
 
           </div>
