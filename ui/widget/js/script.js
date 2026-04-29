@@ -130,6 +130,64 @@ function initPropertyTileLayer() {
     if (propertyHoverPopup) widgetMap.closePopup(propertyHoverPopup);
   });
 
+  propertyTileLayer.on('click', async e => {
+    L.DomEvent.stopPropagation(e);
+    const tileProps = e.layer.properties;
+    if (!tileProps) return;
+
+    // Close the hover tooltip immediately so it doesn't stay on screen
+    if (propertyHoverPopup) widgetMap.closePopup(propertyHoverPopup);
+
+    const lat = e.latlng.lat;
+    const lng = e.latlng.lng;
+
+    // Build prop from tile data immediately, show it without waiting for OPA
+    const prop = {
+      location:      tileProps.address || '',
+      lat,
+      lng,
+      zip_code:      '',
+      parcel_number: String(tileProps.property_id || ''),
+      market_value:  tileProps.market_value != null ? parseInt(tileProps.market_value, 10) : null,
+      predicted_value: tileProps.predicted_value,
+      owner_1:       '',
+      owner_2:       '',
+      sale_price:    null,
+      sale_date:     null,
+      year_built:    null,
+      building_code_description: '',
+    };
+
+    clearError();
+    // Show tile data right away — panel updates instantly on click
+    placeMapMarker(prop);
+    populateSummary(prop, null);
+    if (prop.location) el('propertySearch').value = titleCase(prop.location);
+    setSearchState(true);
+
+    // Enrich with OPA Socrata + city distribution in parallel
+    const [opaData, distrib] = await Promise.all([
+      prop.parcel_number ? OPA.getByParcelNumber(prop.parcel_number).catch(() => null) : Promise.resolve(null),
+      OPA.getCityDistribution().catch(() => []),
+    ]);
+
+    if (opaData) {
+      Object.assign(prop, { lat, lng, ...opaData });
+      if (prop.location) el('propertySearch').value = titleCase(prop.location);
+      const nearby = await OPA.getNearby(prop.zip_code, prop.parcel_number, 5).catch(() => []);
+      populateSummary(prop, nearby);
+      renderDistChart(distrib, prop.market_value);
+      renderNbrChart(nearby, prop);
+      placeMapMarker(prop);
+    } else {
+      populateSummary(prop, []);
+      renderDistChart(distrib, prop.market_value);
+      renderNbrChart([], prop);
+    }
+
+    setSearchState(false);
+  });
+
   propertyTileLayer.addTo(widgetMap);
 
   const legendControl = L.control({ position: 'bottomleft' });
@@ -243,21 +301,15 @@ async function lookupProperty(preloadedProp) {
 async function processProp(prop) {
   setSearchState(true);
 
-  // Immediately show location on map
   placeMapMarker(prop);
+  populateSummary(prop, null);
 
-  // Show basic data while async calls are in flight
-  populateSummary(prop, null, null);
-
-  // Fetch history, nearby, and city distribution in parallel
-  const [history, nearby, distrib] = await Promise.all([
-    OPA.getHistory(prop.parcel_number).catch(() => []),
+  const [nearby, distrib] = await Promise.all([
     OPA.getNearby(prop.zip_code, prop.parcel_number, 5).catch(() => []),
     OPA.getCityDistribution().catch(() => []),
   ]);
 
-  populateSummary(prop, history, nearby);
-  renderYoyChart(history);
+  populateSummary(prop, nearby);
   renderDistChart(distrib, prop.market_value);
   renderNbrChart(nearby, prop);
 
@@ -268,10 +320,12 @@ async function processProp(prop) {
 
 function placeMapMarker(prop) {
   if (widgetMarker) widgetMarker.remove();
+  const owner = prop.owner_1 ? `<div class="map-popup-owner">${escHtml(titleCase(prop.owner_1))}</div>` : '';
+  const value = prop.market_value ? `<div class="map-popup-value">Assessed: ${fmtMoney(prop.market_value)}</div>` : '';
   widgetMarker = L.marker([prop.lat, prop.lng])
     .bindPopup(
-      `<div class="map-popup-address">${escHtml(titleCase(prop.location))}</div>`,
-      { maxWidth: 240 }
+      `<div class="map-popup-address">${escHtml(titleCase(prop.location))}</div>${owner}${value}`,
+      { maxWidth: 260 }
     )
     .addTo(widgetMap)
     .openPopup();
@@ -289,105 +343,40 @@ function clearMarker() {
 
 // ── Summary card ─────────────────────────────────────────────
 
-function populateSummary(prop, history, nearby) {
+function populateSummary(prop, nearby) {
   const currentVal = parseInt(prop.market_value, 10) || 0;
 
   el('summaryAddress').textContent =
     titleCase(prop.location) + (prop.zip_code ? ', Philadelphia PA ' + prop.zip_code : '');
-  el('summaryPid').textContent = 'Property ID: ' + (prop.parcel_number || '—');
 
-  const sorted = (history || [])
-    .map(h => ({ year: parseInt(h.year, 10), val: parseInt(h.market_value, 10) }))
-    .filter(h => h.year && h.val)
-    .sort((a, b) => b.year - a.year);
+  const pidParts = ['Property ID: ' + (prop.parcel_number || '—')];
+  if (prop.owner_1) pidParts.push('Owner: ' + titleCase(prop.owner_1));
+  if (prop.year_built) pidParts.push('Built: ' + prop.year_built);
+  el('summaryPid').textContent = pidParts.join('  ·  ');
 
-  const latestYear = sorted.length     ? sorted[0].year : null;
-  const latestVal  = sorted.length     ? sorted[0].val  : currentVal;
-  const prevYear   = sorted.length > 1 ? sorted[1].year : null;
-  const prevVal    = sorted.length > 1 ? sorted[1].val  : null;
+  el('summaryAssessedValue').textContent = fmtMoney(currentVal || null);
 
-  el('summaryTaxYear').textContent       = latestYear || '—';
-  el('summaryAssessedLabel').textContent = latestYear ? `${latestYear} Assessed Value` : 'Assessed Value';
-  el('summaryAssessedValue').textContent = fmtMoney(latestVal);
-
-  if (prevVal !== null) {
-    el('summaryPrevLabel').textContent = prevYear ? `${prevYear} Assessed Value` : 'Previous Year Value';
-    el('summaryPrevValue').textContent = fmtMoney(prevVal);
-
-    const delta    = latestVal - prevVal;
-    const deltaPct = ((delta / prevVal) * 100).toFixed(1);
-    const sign     = delta >= 0 ? '+' : '';
-
-    el('summaryDollarChange').textContent = sign + fmtMoney(delta);
-    el('summaryPctChange').textContent    = sign + deltaPct + '%';
-
-    ['dollarChangeBox', 'pctChangeBox'].forEach(id => {
-      el(id).classList.toggle('positive', delta > 0);
-      el(id).classList.toggle('negative', delta < 0);
-    });
-
-    let insight = `Your property's assessed value `
-      + `<strong>${delta >= 0 ? 'increased' : 'decreased'} by ${Math.abs(deltaPct)}%</strong>`
-      + ` (${prevYear || 'prior year'} → ${latestYear || 'current'})`;
-
-    if (nearby && nearby.length) {
-      const nbrVals = nearby.map(n => parseInt(n.market_value, 10)).filter(v => v > 0);
-      if (nbrVals.length) {
-        const avg = nbrVals.reduce((a, b) => a + b, 0) / nbrVals.length;
-        const rel = latestVal > avg
-          ? '<span class="insight-tag above">above</span>'
-          : '<span class="insight-tag below">below</span>';
-        insight += ` — ${rel} the surrounding ZIP ${escHtml(prop.zip_code)} average of <strong>${fmtMoney(avg)}</strong>.`;
-      }
-    } else {
-      insight += '.';
+  if (nearby && nearby.length) {
+    const nbrVals = nearby.map(n => parseInt(n.market_value, 10)).filter(v => v > 0);
+    if (nbrVals.length && currentVal) {
+      const avg = nbrVals.reduce((a, b) => a + b, 0) / nbrVals.length;
+      const rel = currentVal > avg
+        ? '<span class="insight-tag above">above</span>'
+        : '<span class="insight-tag below">below</span>';
+      el('summaryInsight').innerHTML =
+        `This property's assessed value is ${rel} the surrounding ZIP ${escHtml(prop.zip_code)} average of <strong>${fmtMoney(avg)}</strong>.`;
+      return;
     }
-    el('summaryInsight').innerHTML = insight;
-
-  } else {
-    el('summaryPrevLabel').textContent    = 'Previous Year Value';
-    el('summaryPrevValue').textContent    = '—';
-    el('summaryDollarChange').textContent = '—';
-    el('summaryPctChange').textContent    = '—';
-    ['dollarChangeBox', 'pctChangeBox'].forEach(id => {
-      el(id).classList.remove('positive', 'negative');
-    });
-    el('summaryInsight').textContent =
-      'Historical assessment data is not yet available for this property.';
   }
+
+  el('summaryInsight').textContent = currentVal
+    ? 'Search for a property to compare its value to the neighborhood average.'
+    : 'Search for a property to see its assessed value.';
 }
 
 // ── Charts ───────────────────────────────────────────────────
 
 const EMPTY_HTML = '<div class="chart-empty">No data available.</div>';
-
-function renderYoyChart(history) {
-  const section = el('chartYoy');
-  const sorted = (history || [])
-    .map(h => ({ year: parseInt(h.year, 10), val: parseInt(h.market_value, 10) }))
-    .filter(h => h.year && h.val)
-    .sort((a, b) => a.year - b.year)
-    .slice(-5);
-
-  if (!sorted.length) { section.innerHTML = EMPTY_HTML; return; }
-
-  const maxVal = Math.max(...sorted.map(h => h.val));
-  const bars   = sorted.map((h, i) => {
-    const pct    = Math.round((h.val / maxVal) * 82) + 12;
-    const isLast = i === sorted.length - 1;
-    return `
-      <div class="bc-group">
-        <div class="bc-value${isLast ? ' highlight-val' : ''}">${fmtMoney(h.val)}</div>
-        <div class="bc-bar-wrap">
-          <div class="bc-bar ${isLast ? 'gold' : 'blue'}" style="height:${pct}%"></div>
-        </div>
-        <div class="bc-year">${h.year}</div>
-      </div>`;
-  }).join('');
-
-  section.className = '';
-  section.innerHTML = `<div class="bar-compare">${bars}</div>`;
-}
 
 function renderDistChart(distrib, propertyValue) {
   const section = el('chartDist');

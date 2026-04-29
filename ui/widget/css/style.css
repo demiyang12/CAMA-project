@@ -477,6 +477,12 @@ html, body { height: 100%; display: flex; flex-direction: column; }
 }
 
 /* ---- Property hover popup ---- */
+/* pointer-events:none lets clicks pass through to the tile layer below */
+.property-hover-popup .leaflet-popup-content-wrapper,
+.property-hover-popup .leaflet-popup-tip-container,
+.property-hover-popup .leaflet-popup-tip {
+  pointer-events: none;
+}
 .property-hover-popup .leaflet-popup-content-wrapper {
   background: rgba(255, 255, 255, 0.97);
   border-radius: 4px;
