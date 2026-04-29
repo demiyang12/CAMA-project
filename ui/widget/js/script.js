@@ -2,7 +2,7 @@
 //  Property Owner Widget — script.js
 //  City of Philadelphia — Office of Property Assessment
 //
-//  Depends on: Leaflet, ../js/opa-api.js (OPA object)
+//  Depends on: Leaflet
 // ============================================================
 
 'use strict';
@@ -16,7 +16,7 @@ const ADDRESS_ZOOM = 17;
 const PROPERTY_TILE_URL   = 'https://storage.googleapis.com/musa5090s26-team4-public/tiles/properties/{z}/{x}/{y}.pbf';
 const PROPERTY_LAYER_NAME = 'property_tile_info';
 
-let propertyTileLayer = null;
+let propertyTileLayer  = null;
 let propertyHoverPopup = null;
 
 const VALUE_BREAKS = [
@@ -85,6 +85,59 @@ function debounce(fn, ms) {
   return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
 }
 
+// ── Census geocoder ──────────────────────────────────────────
+// Docs: https://geocoding.geo.census.gov/geocoder/Geocoding_Services_API.html
+// No API key required. The endpoint does not send CORS headers, so we
+// load it via JSONP (script-tag injection with a callback name).
+const CENSUS_GEOCODER_URL =
+  'https://geocoding.geo.census.gov/geocoder/locations/onelineaddress';
+
+function jsonp(url, timeoutMs = 8000) {
+  return new Promise((resolve, reject) => {
+    const cbName  = '__census_cb_' + Math.random().toString(36).slice(2);
+    const fullUrl = url + (url.includes('?') ? '&' : '?') + 'callback=' + cbName;
+    const script  = document.createElement('script');
+    let timer;
+    const cleanup = () => {
+      delete window[cbName];
+      script.remove();
+      clearTimeout(timer);
+    };
+    window[cbName] = data => { cleanup(); resolve(data); };
+    script.onerror = () => { cleanup(); reject(new Error('JSONP load failed')); };
+    timer = setTimeout(() => { cleanup(); reject(new Error('JSONP timeout')); }, timeoutMs);
+    script.src = fullUrl;
+    document.head.appendChild(script);
+  });
+}
+
+async function censusGeocode(query, limit = 8) {
+  if (!query) return [];
+  const params = new URLSearchParams({
+    address:   query + ', Philadelphia, PA',
+    benchmark: 'Public_AR_Current',
+    format:    'json',
+  });
+  const data = await jsonp(`${CENSUS_GEOCODER_URL}?${params}`);
+  const matches = ((data.result && data.result.addressMatches) || []).slice(0, limit);
+  return matches.map(m => ({
+    matched: m.matchedAddress,
+    street:  (m.matchedAddress || '').split(',')[0] || m.matchedAddress,
+    zip:     (m.addressComponents && m.addressComponents.zip) || '',
+    lat:     m.coordinates && m.coordinates.y,
+    lng:     m.coordinates && m.coordinates.x,
+  })).filter(m => m.lat != null && m.lng != null);
+}
+
+// Polyfill: Leaflet 1.7+ removed L.DomEvent.fakeStop, but Leaflet.VectorGrid
+// 1.3.0 still calls it on feature click — without this, clicks throw silently.
+if (L.DomEvent && !L.DomEvent.fakeStop) {
+  L.DomEvent.fakeStop = function (e) {
+    L.DomEvent.preventDefault(e);
+    L.DomEvent.stopPropagation(e);
+  };
+}
+
 // ── Map ──────────────────────────────────────────────────────
 
 function initMap() {
@@ -130,62 +183,14 @@ function initPropertyTileLayer() {
     if (propertyHoverPopup) widgetMap.closePopup(propertyHoverPopup);
   });
 
-  propertyTileLayer.on('click', async e => {
+  propertyTileLayer.on('click', e => {
     L.DomEvent.stopPropagation(e);
-    const tileProps = e.layer.properties;
-    if (!tileProps) return;
+    const tileProps = (e.layer && e.layer.properties) || {};
 
-    // Close the hover tooltip immediately so it doesn't stay on screen
     if (propertyHoverPopup) widgetMap.closePopup(propertyHoverPopup);
 
-    const lat = e.latlng.lat;
-    const lng = e.latlng.lng;
-
-    // Build prop from tile data immediately, show it without waiting for OPA
-    const prop = {
-      location:      tileProps.address || '',
-      lat,
-      lng,
-      zip_code:      '',
-      parcel_number: String(tileProps.property_id || ''),
-      market_value:  tileProps.market_value != null ? parseInt(tileProps.market_value, 10) : null,
-      predicted_value: tileProps.predicted_value,
-      owner_1:       '',
-      owner_2:       '',
-      sale_price:    null,
-      sale_date:     null,
-      year_built:    null,
-      building_code_description: '',
-    };
-
-    clearError();
-    // Show tile data right away — panel updates instantly on click
-    placeMapMarker(prop);
-    populateSummary(prop, null);
-    if (prop.location) el('propertySearch').value = titleCase(prop.location);
-    setSearchState(true);
-
-    // Enrich with OPA Socrata + city distribution in parallel
-    const [opaData, distrib] = await Promise.all([
-      prop.parcel_number ? OPA.getByParcelNumber(prop.parcel_number).catch(() => null) : Promise.resolve(null),
-      OPA.getCityDistribution().catch(() => []),
-    ]);
-
-    if (opaData) {
-      Object.assign(prop, { lat, lng, ...opaData });
-      if (prop.location) el('propertySearch').value = titleCase(prop.location);
-      const nearby = await OPA.getNearby(prop.zip_code, prop.parcel_number, 5).catch(() => []);
-      populateSummary(prop, nearby);
-      renderDistChart(distrib, prop.market_value);
-      renderNbrChart(nearby, prop);
-      placeMapMarker(prop);
-    } else {
-      populateSummary(prop, []);
-      renderDistChart(distrib, prop.market_value);
-      renderNbrChart([], prop);
-    }
-
-    setSearchState(false);
+    populateSummary(tileProps);
+    placeMapMarker(tileProps, e.latlng);
   });
 
   propertyTileLayer.addTo(widgetMap);
@@ -200,136 +205,22 @@ function initPropertyTileLayer() {
   legendControl.addTo(widgetMap);
 }
 
-// ── Autocomplete ─────────────────────────────────────────────
-
-function setupAutocomplete(inputId, onSelect) {
-  const input    = el(inputId);
-  const wrap     = input.closest('.search-input-wrap');
-  const dropdown = document.createElement('ul');
-  dropdown.className = 'autocomplete-list';
-  wrap.appendChild(dropdown);
-
-  let currentResults = [];
-
-  const suggest = debounce(async (query) => {
-    if (query.length < 6) { closeDropdown(); return; }
-
-    dropdown.innerHTML = '<li class="autocomplete-status">Searching…</li>';
-    dropdown.classList.add('open');
-
-    try {
-      const results = await OPA.searchByAddress(query, 8);
-      currentResults = results;
-
-      if (!results.length) {
-        dropdown.innerHTML = '<li class="autocomplete-status">No addresses found.</li>';
-        return;
-      }
-
-      dropdown.innerHTML = results.map((prop, i) => `
-        <li class="autocomplete-item" data-idx="${i}" tabindex="0">
-          <span class="autocomplete-item-addr">${escHtml(titleCase(prop.location))}</span>
-          <span class="autocomplete-item-zip">${escHtml(prop.zip_code || '')}</span>
-        </li>`).join('');
-
-      dropdown.querySelectorAll('.autocomplete-item').forEach(li => {
-        li.addEventListener('mousedown', e => {
-          // mousedown fires before blur, so preventDefault keeps focus
-          e.preventDefault();
-          const prop = currentResults[parseInt(li.dataset.idx, 10)];
-          input.value = titleCase(prop.location);
-          closeDropdown();
-          onSelect(prop);
-        });
-      });
-
-    } catch {
-      dropdown.innerHTML = '<li class="autocomplete-status">Error loading suggestions.</li>';
-    }
-  }, 320);
-
-  input.addEventListener('input', () => suggest(input.value.trim()));
-
-  input.addEventListener('blur', () => {
-    // Slight delay so mousedown on item fires first
-    setTimeout(closeDropdown, 150);
-  });
-
-  // Close on Escape
-  input.addEventListener('keydown', e => {
-    if (e.key === 'Escape') closeDropdown();
-  });
-
-  function closeDropdown() {
-    dropdown.classList.remove('open');
-    dropdown.innerHTML = '';
-    currentResults = [];
-  }
-}
-
-// ── Search ───────────────────────────────────────────────────
-
-// Called when user types and hits Enter, or clicks Search button
-async function lookupProperty(preloadedProp) {
-  if (preloadedProp) {
-    await processProp(preloadedProp);
-    return;
-  }
-
-  const address = el('propertySearch').value.trim();
-  if (!address) return;
-
-  setSearchState(true);
-  clearError();
-
-  try {
-    const results = await OPA.searchByAddress(address, 1);
-    if (!results.length) {
-      showError('No property found. Try a different format, e.g. "1500 Market St".');
-      setSearchState(false);
-      return;
-    }
-    await processProp(results[0]);
-  } catch (err) {
-    showError('Could not load property data. Please try again.');
-    console.error('[widget] lookupProperty:', err);
-    setSearchState(false);
-  }
-}
-
-// Core flow once we have a property record
-async function processProp(prop) {
-  setSearchState(true);
-
-  placeMapMarker(prop);
-  populateSummary(prop, null);
-
-  const [nearby, distrib] = await Promise.all([
-    OPA.getNearby(prop.zip_code, prop.parcel_number, 5).catch(() => []),
-    OPA.getCityDistribution().catch(() => []),
-  ]);
-
-  populateSummary(prop, nearby);
-  renderDistChart(distrib, prop.market_value);
-  renderNbrChart(nearby, prop);
-
-  setSearchState(false);
-}
-
 // ── Map marker ───────────────────────────────────────────────
 
-function placeMapMarker(prop) {
+function placeMapMarker(tileProps, latlng) {
+  if (!latlng) return;
   if (widgetMarker) widgetMarker.remove();
-  const owner = prop.owner_1 ? `<div class="map-popup-owner">${escHtml(titleCase(prop.owner_1))}</div>` : '';
-  const value = prop.market_value ? `<div class="map-popup-value">Assessed: ${fmtMoney(prop.market_value)}</div>` : '';
-  widgetMarker = L.marker([prop.lat, prop.lng])
+  const address = tileProps.address ? titleCase(tileProps.address) : '';
+  const market  = tileProps.market_value != null ? fmtMoney(tileProps.market_value) : null;
+  const value   = market ? `<div class="map-popup-value">Market: ${market}</div>` : '';
+  widgetMarker = L.marker(latlng)
     .bindPopup(
-      `<div class="map-popup-address">${escHtml(titleCase(prop.location))}</div>${owner}${value}`,
+      `<div class="map-popup-address">${escHtml(address || '—')}</div>${value}`,
       { maxWidth: 260 }
     )
     .addTo(widgetMap)
     .openPopup();
-  widgetMap.flyTo([prop.lat, prop.lng], ADDRESS_ZOOM, { duration: 0.8 });
+  widgetMap.flyTo(latlng, ADDRESS_ZOOM, { duration: 0.8 });
   el('clearMarkerBtn').style.display = 'inline-block';
 }
 
@@ -343,139 +234,151 @@ function clearMarker() {
 
 // ── Summary card ─────────────────────────────────────────────
 
-function populateSummary(prop, nearby) {
-  const currentVal = parseInt(prop.market_value, 10) || 0;
+function populateSummary(tileProps) {
+  el('summaryPid').textContent =
+    'Property ID: ' + (tileProps.property_id != null ? tileProps.property_id : '—');
 
-  el('summaryAddress').textContent =
-    titleCase(prop.location) + (prop.zip_code ? ', Philadelphia PA ' + prop.zip_code : '');
+  const assessed = Number(tileProps.predicted_value);
+  const market   = Number(tileProps.market_value);
+  const hasAssessed = Number.isFinite(assessed) && assessed > 0;
+  const hasMarket   = Number.isFinite(market)   && market   > 0;
 
-  const pidParts = ['Property ID: ' + (prop.parcel_number || '—')];
-  if (prop.owner_1) pidParts.push('Owner: ' + titleCase(prop.owner_1));
-  if (prop.year_built) pidParts.push('Built: ' + prop.year_built);
-  el('summaryPid').textContent = pidParts.join('  ·  ');
+  el('summaryAssessedValue').textContent = hasAssessed ? fmtMoney(assessed) : '—';
+  el('summaryMarketValue').textContent   = hasMarket   ? fmtMoney(market)   : '—';
 
-  el('summaryAssessedValue').textContent = fmtMoney(currentVal || null);
-
-  if (nearby && nearby.length) {
-    const nbrVals = nearby.map(n => parseInt(n.market_value, 10)).filter(v => v > 0);
-    if (nbrVals.length && currentVal) {
-      const avg = nbrVals.reduce((a, b) => a + b, 0) / nbrVals.length;
-      const rel = currentVal > avg
-        ? '<span class="insight-tag above">above</span>'
-        : '<span class="insight-tag below">below</span>';
-      el('summaryInsight').innerHTML =
-        `This property's assessed value is ${rel} the surrounding ZIP ${escHtml(prop.zip_code)} average of <strong>${fmtMoney(avg)}</strong>.`;
-      return;
-    }
+  const insight = el('summaryInsight');
+  if (hasAssessed && hasMarket) {
+    const diff = assessed - market;
+    const pct  = Math.round((diff / market) * 100);
+    const tag  = diff >= 0
+      ? '<span class="insight-tag above">above</span>'
+      : '<span class="insight-tag below">below</span>';
+    insight.innerHTML =
+      `Predicted assessed value is ${tag} market by <strong>${fmtMoney(Math.abs(diff))}</strong> (${Math.abs(pct)}%).`;
+  } else {
+    insight.textContent = 'Click any property on the map to see its predicted and market values.';
   }
-
-  el('summaryInsight').textContent = currentVal
-    ? 'Search for a property to compare its value to the neighborhood average.'
-    : 'Search for a property to see its assessed value.';
 }
 
-// ── Charts ───────────────────────────────────────────────────
+// ── Address search (Census geocoder) ─────────────────────────
 
-const EMPTY_HTML = '<div class="chart-empty">No data available.</div>';
-
-function renderDistChart(distrib, propertyValue) {
-  const section = el('chartDist');
-  if (!distrib || !distrib.length) { section.innerHTML = EMPTY_HTML; return; }
-
-  const LABELS = ['<125k', '125–250k', '250–375k', '375–500k',
-                  '500–625k', '625–750k', '750–875k', '875k+'];
-  const BOUNDS = [0, 125000, 250000, 375000, 500000, 625000, 750000, 875000, Infinity];
-
-  const propVal    = parseInt(propertyValue, 10);
-  const propBucket = BOUNDS.findIndex((b, i) => propVal >= b && propVal < BOUNDS[i + 1]);
-  const counts     = new Array(8).fill(0);
-  distrib.forEach(r => {
-    const b = parseInt(r.bucket, 10);
-    if (b >= 1 && b <= 8) counts[b - 1] = parseInt(r.cnt, 10);
-  });
-  const maxCnt = Math.max(...counts, 1);
-
-  const cols = counts.map((cnt, i) => {
-    const pct = Math.round((cnt / maxCnt) * 88) + 8;
-    return `
-      <div class="dc-col${(i + 1) === propBucket ? ' highlight' : ''}">
-        <div class="dc-bar" style="height:${pct}%"></div>
-        <div class="dc-tick">${LABELS[i]}</div>
-      </div>`;
-  }).join('');
-
-  const youLabel = propBucket >= 1
-    ? `&#8593; You (${LABELS[propBucket - 1]})`
-    : '&#8593; Your property';
-
-  section.className = '';
-  section.innerHTML = `
-    <div class="dist-chart">
-      <div class="dist-bars">${cols}</div>
-      <div class="dc-you-label">${youLabel}</div>
-    </div>`;
-}
-
-function renderNbrChart(nearby, thisProp) {
-  const section = el('chartNbr');
-  if (!nearby || !nearby.length) { section.innerHTML = EMPTY_HTML; return; }
-
-  const all = [
-    { name: 'This Property', value: parseInt(thisProp.market_value, 10), isSelf: true },
-    ...nearby.map(n => ({
-      name:  titleCase(n.location).split(' ').slice(0, 3).join(' '),
-      value: parseInt(n.market_value, 10),
-    })),
-  ].filter(p => p.value > 0).sort((a, b) => b.value - a.value);
-
-  const maxVal = Math.max(...all.map(p => p.value), 1);
-  const rows   = all.map(p => {
-    const pct = Math.round((p.value / maxVal) * 94) + 4;
-    return `
-      <div class="hc-row${p.isSelf ? ' self' : ''}">
-        <div class="hc-name">${escHtml(p.name)}</div>
-        <div class="hc-bar-wrap">
-          <div class="hc-bar" style="width:${pct}%"><span>${fmtMoney(p.value)}</span></div>
-        </div>
-      </div>`;
-  }).join('');
-
-  section.className = '';
-  section.innerHTML = `<div class="horiz-chart">${rows}</div>`;
-}
-
-// ── UI state helpers ──────────────────────────────────────────
-
-function setSearchState(loading) {
-  const btn = el('searchBtn');
-  btn.textContent = loading ? 'Searching…' : 'Search';
-  btn.disabled    = loading;
-}
-
-function showError(msg) {
+function showSearchError(msg) {
   const div = el('searchError');
   div.textContent   = msg;
   div.style.display = 'block';
 }
 
-function clearError() {
+function clearSearchError() {
   const div = el('searchError');
   div.textContent   = '';
   div.style.display = 'none';
+}
+
+function setSearchLoading(loading) {
+  const btn = el('searchBtn');
+  btn.textContent = loading ? 'Searching…' : 'Search';
+  btn.disabled    = loading;
+}
+
+function flyToGeocodeResult(match) {
+  if (widgetMarker) widgetMarker.remove();
+  widgetMarker = L.marker([match.lat, match.lng])
+    .bindPopup(
+      `<div class="map-popup-address">${escHtml(titleCase(match.street))}</div>` +
+      `<div class="map-popup-value">Click the property to see values</div>`,
+      { maxWidth: 260 }
+    )
+    .addTo(widgetMap)
+    .openPopup();
+  widgetMap.flyTo([match.lat, match.lng], ADDRESS_ZOOM, { duration: 0.8 });
+  el('clearMarkerBtn').style.display = 'inline-block';
+}
+
+// Search button / Enter key
+async function lookupAddress() {
+  const query = el('propertySearch').value.trim();
+  if (!query) return;
+
+  clearSearchError();
+  setSearchLoading(true);
+  try {
+    const matches = await censusGeocode(query, 1);
+    if (!matches.length) {
+      showSearchError('No address match found. Try a more complete address (e.g. "1500 Market St").');
+      return;
+    }
+    flyToGeocodeResult(matches[0]);
+  } catch (err) {
+    console.error('[widget] geocode failed:', err);
+    showSearchError('Address lookup failed. Please try again.');
+  } finally {
+    setSearchLoading(false);
+  }
+}
+
+function setupAutocomplete() {
+  const input    = el('propertySearch');
+  const wrap     = input.closest('.search-input-wrap');
+  const dropdown = document.createElement('ul');
+  dropdown.className = 'autocomplete-list';
+  wrap.appendChild(dropdown);
+
+  let currentResults = [];
+
+  function closeDropdown() {
+    dropdown.classList.remove('open');
+    dropdown.innerHTML = '';
+    currentResults = [];
+  }
+
+  const suggest = debounce(async (query) => {
+    if (query.length < 4) { closeDropdown(); return; }
+
+    dropdown.innerHTML = '<li class="autocomplete-status">Searching…</li>';
+    dropdown.classList.add('open');
+
+    try {
+      const results = await censusGeocode(query, 8);
+      currentResults = results;
+
+      if (!results.length) {
+        dropdown.innerHTML = '<li class="autocomplete-status">No addresses found.</li>';
+        return;
+      }
+
+      dropdown.innerHTML = results.map((m, i) => `
+        <li class="autocomplete-item" data-idx="${i}" tabindex="0">
+          <span class="autocomplete-item-addr">${escHtml(titleCase(m.street))}</span>
+          <span class="autocomplete-item-zip">${escHtml(m.zip || '')}</span>
+        </li>`).join('');
+
+      dropdown.querySelectorAll('.autocomplete-item').forEach(li => {
+        li.addEventListener('mousedown', e => {
+          e.preventDefault(); // keep input focus until selection runs
+          const match = currentResults[parseInt(li.dataset.idx, 10)];
+          input.value = titleCase(match.street);
+          closeDropdown();
+          clearSearchError();
+          flyToGeocodeResult(match);
+        });
+      });
+    } catch (err) {
+      console.error('[widget] autocomplete failed:', err);
+      dropdown.innerHTML = '<li class="autocomplete-status">Error loading suggestions.</li>';
+    }
+  }, 320);
+
+  input.addEventListener('input',  () => suggest(input.value.trim()));
+  input.addEventListener('blur',   () => setTimeout(closeDropdown, 150));
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Escape') closeDropdown();
+    if (e.key === 'Enter')  { closeDropdown(); lookupAddress(); }
+  });
 }
 
 // ── Init ─────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', () => {
   initMap();
-
-  // Wire up autocomplete: on selection immediately run the full lookup
-  setupAutocomplete('propertySearch', prop => {
-    clearError();
-    processProp(prop);
-  });
-
-  el('propertySearch').addEventListener('keydown', e => {
-    if (e.key === 'Enter') lookupProperty();
-  });
+  setupAutocomplete();
 });

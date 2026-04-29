@@ -32,18 +32,18 @@
     </div>
   </header>
 
-  <!-- HERO SEARCH -->
+  <!-- HERO -->
   <div class="hero-search">
     <h2>Property Assessment Lookup</h2>
-    <p>Enter a Philadelphia property address to view your current assessment, tax information, and appeal options.</p>
+    <p>Search a Philadelphia address to fly the map there, or click any property to see its values.</p>
     <div class="hero-search-bar">
       <div class="search-input-wrap">
-        <input type="search" id="propertySearch" placeholder="Enter a Philadelphia address (e.g. 1234 Market St)" autocomplete="off" />
+        <input type="search" id="propertySearch" placeholder="Enter a Philadelphia address (e.g. 1500 Market St)" autocomplete="off" />
       </div>
-      <button id="searchBtn" type="button" onclick="lookupProperty()">Search</button>
+      <button id="searchBtn" type="button" onclick="lookupAddress()">Search</button>
     </div>
     <div id="searchError" class="hero-error" style="display:none"></div>
-    <div class="hero-hint">Try: "1500 Market St", "4500 Baltimore Ave", or "1832 E Passyunk Ave"</div>
+    <div class="hero-hint">After locating the address, click the property polygon to view its values.</div>
   </div>
 
   <!-- PAGE BODY -->
@@ -60,42 +60,28 @@
         <div id="widget-map"></div>
       </div>
 
-      <!-- Right: Two stacked cards -->
+      <!-- Right: Property Summary -->
       <div class="right-panel">
 
-        <!-- Card 1: Property Summary -->
         <div class="summary-card">
           <div class="summary-header">
-            <div id="summaryAddress" class="summary-address">—</div>
             <div id="summaryPid" class="summary-pid">Property ID: —</div>
           </div>
           <div class="summary-body">
 
-            <div class="summary-row">
-              <div class="sr-label">Assessed Value</div>
-              <div id="summaryAssessedValue" class="sr-value sr-value-main">—</div>
+            <div class="summary-values">
+              <div class="summary-value-block">
+                <div class="sr-label">Assessed Value (Predicted)</div>
+                <div id="summaryAssessedValue" class="sr-value sr-value-main">—</div>
+              </div>
+              <div class="summary-value-block">
+                <div class="sr-label">Market Value</div>
+                <div id="summaryMarketValue" class="sr-value sr-value-main">—</div>
+              </div>
             </div>
 
             <div id="summaryInsight" class="summary-insight">
-              Search for a property to see how its assessed value compares to the surrounding neighborhood average.
-            </div>
-
-          </div>
-        </div>
-
-        <!-- Card 2: Charts -->
-        <div class="charts-card">
-          <div class="card-header">Assessment Analysis</div>
-          <div class="charts-body">
-
-            <div class="chart-section">
-              <div class="chart-label">Position in City-Wide Distribution</div>
-              <div id="chartDist" class="chart-empty">Search for a property to load data.</div>
-            </div>
-
-            <div class="chart-section">
-              <div class="chart-label">Neighborhood Comparison</div>
-              <div id="chartNbr" class="chart-empty">Search for a property to load data.</div>
+              Click any property on the map to see its predicted and market values.
             </div>
 
           </div>
@@ -121,7 +107,6 @@
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://unpkg.com/leaflet.vectorgrid@1.3.0/dist/Leaflet.VectorGrid.min.js"></script>
-  <script src="../js/opa-api.js"></script>
   <script src="js/script.js"></script>
 </body>
 </html>

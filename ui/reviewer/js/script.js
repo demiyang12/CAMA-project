@@ -298,6 +298,15 @@ function togglePropertyLayer(btn) {
   markers.forEach(m => m.bringToFront && m.bringToFront());
 }
 
+// Polyfill: Leaflet 1.7+ removed L.DomEvent.fakeStop, but Leaflet.VectorGrid
+// 1.3.0 still calls it on feature click — without this, clicks throw silently.
+if (L.DomEvent && !L.DomEvent.fakeStop) {
+  L.DomEvent.fakeStop = function (e) {
+    L.DomEvent.preventDefault(e);
+    L.DomEvent.stopPropagation(e);
+  };
+}
+
 // ── Map ──────────────────────────────────────────────────────
 
 function initMap() {
